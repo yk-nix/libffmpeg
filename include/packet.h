@@ -8,6 +8,8 @@
 #ifndef INCLUDE_PACKET_H_
 #define INCLUDE_PACKET_H_
 
+#include <pthread.h>
+
 #include <libavcodec/packet.h>
 
 /*
@@ -19,6 +21,8 @@ typedef struct exAVPacket {
 	struct list_head list;
 	pthread_rwlock_t rwlock;
 	atomic_t refcount;
+
+	int serial;
 
 	struct exAVPacket *(*get)(struct exAVPacket *self);
 	void (*put)(struct exAVPacket *self);

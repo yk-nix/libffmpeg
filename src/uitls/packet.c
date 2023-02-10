@@ -26,8 +26,6 @@ static void put(exAVPacket *self) {
 			return; /* there is someone else has 'get' this packet, so let that caller free the packet */
 		atomic_dec(&self->refcount);
 		list_del(&self->list);
-		if (self->avpkt)
-			av_packet_unref(self->avpkt);
 		av_packet_free(&self->avpkt);
 		pthread_rwlock_unlock(&self->rwlock);
 		pthread_rwlock_destroy(&self->rwlock);
@@ -44,6 +42,7 @@ static int ex_av_packet_init(exAVPacket *p) {
 	int ret = -1;
 	INIT_LIST_HEAD(&p->list);
 	atomic_set(&p->refcount, 1);
+	p->serial = -1;
 	ex_av_packet_ops_init(p);
 	pthread_rwlockattr_t rwlockattr;
 	if(pthread_rwlockattr_init(&rwlockattr))

@@ -45,7 +45,6 @@ static inline int avcodec_is_supported_sample_format(AVCodec *codec, const enum 
 	return 0;
 }
 
-
 /*
  * Return a frame which will contain the picture specified by 'url';
  * the first frame will be returned if the picture is a .gif picture.
@@ -90,8 +89,20 @@ extern void av_frame_show(AVFrame *frame);
 typedef struct exAVFrame {
 	AVFrame *avframe;
 	struct list_head list;
-	pthread_rwlock_t rwlock;
 	atomic_t refcount;
+	pthread_rwlock_t rwlock;
+
+	AVSubtitle sub;
+	int serial;
+	double pts;                        /* presentation timestamp for the frame */
+	double duration;                   /* estimated duration of the frame */
+	int64_t pos;                       /* byte position of the frame in the input file */
+	int width;
+	int height;
+	int format;
+	AVRational sar;
+	int uploaded;
+	int flip_v;
 
 	struct exAVFrame *(*get)(struct exAVFrame *self);
 	void (*put)(struct exAVFrame *self);

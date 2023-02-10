@@ -16,12 +16,6 @@
 #include <libavutil/log.h>
 #include <libavformat/avformat.h>
 
-
-
-#ifdef _WIN32
-#undef main /* We don't want SDL to override our main() */
-#endif
-
 /*
  * Set up basic information on a program. 'show_help_default_func' is a program help function, called by show_help().
  */
@@ -78,6 +72,9 @@ void init_dynload(void);
  * free the *_opts contexts and their contents.
  */
 void opt_deinit(void);
+static inline void uninit_opts(void) {
+	opt_deinit();
+}
 
 /**
  * Trivial log callback.
@@ -360,7 +357,7 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
  * be applied to the corresponding stream codec context.
  *
  * @return pointer to the created array of dictionaries.
- * Calls exit() on failure.
+ * Calls () on failure.
  */
 AVDictionary **setup_find_stream_info_opts(AVFormatContext *s,
                                            AVDictionary *codec_opts);
