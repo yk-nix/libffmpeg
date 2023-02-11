@@ -72,150 +72,195 @@ static void update_sample_display(exAVMedia *m, short *samples, int samples_size
 	}
 }
 
+/*
+ * Return non-zero value if audio_callback is timeout waiting for new audio-frames.
+ */
+static inline int audio_callback_wait_is_timeout(exAVMedia *m) {
+	uint64_t timeout_value = m->audio_dev_buf_size / m->audio_dev_params.bytes_per_sec / m->audio_callback_timeout_count;
+	return av_gettime_relative() - m->audio_callback_time > timeout_value;
+}
+
+static int _audio_convert_frame(exAVMedia *m, exAVFrame *f, int wanted_nb_samples) {
+	int len = 0, ret = 0;
+	const uint8_t **in = (const uint8_t **)f->avframe->extended_data;
+	uint8_t **out = &m->audio_cache;
+	int out_count = (int64_t)wanted_nb_samples * m->audio_dev_params.sample_rate / f->avframe->sample_rate + 256;
+	int out_size  = av_samples_get_buffer_size(NULL, m->audio_dev_params.channels, out_count, m->audio_dev_params.sample_fmt, 0);
+	if (out_size < 0) {
+		av_log(NULL, AV_LOG_ERROR, "audio_convert_frame: av_samples_get_buffer_size error: %s\n", av_err2str(out_size));
+		return -1;
+	}
+	if (wanted_nb_samples != f->avframe->nb_samples) {
+		if ((ret = swr_set_compensation(m->swr_ctx,
+				                            (wanted_nb_samples - f->avframe->nb_samples) * m->audio_dev_params.sample_rate / f->avframe->sample_rate,
+														        wanted_nb_samples * m->audio_dev_params.sample_rate / f->avframe->sample_rate) < 0)) {
+			av_log(NULL, AV_LOG_ERROR, "audio_convert_frame: swr_set_compensation error: %s\n", av_err2str(ret));
+			return -1;
+		}
+	}
+	av_fast_malloc(&m->audio_cache, (unsigned int *)&m->audio_cache_size, out_size);
+	if (!m->audio_cache)
+		return AVERROR(ENOMEM);
+	len = swr_convert(m->swr_ctx, out, out_count, in, f->avframe->nb_samples);
+	if (len < 0) {
+		av_log(NULL, AV_LOG_ERROR, "audio_convert_frame: swr_convert error: %s\n", av_err2str(ret));
+		return -1;
+	}
+	if (len == out_count) {
+		av_log(NULL, AV_LOG_WARNING, "audio_convert_frame: audio buffer is probably too small\n");
+		if (swr_init(m->swr_ctx) < 0)
+			swr_free(&m->swr_ctx);
+	}
+	m->audio_buf = m->audio_cache;
+	return len * m->audio_dev_params.channels * av_get_bytes_per_sample(m->audio_dev_params.sample_fmt);
+}
+
+static int audio_convert_frame(exAVMedia *m, exAVFrame *f) {
+	int64_t channel_layout;
+	int wanted_nb_samples = synchronize_audio(m, f->avframe->nb_samples);
+
+	if (f->avframe->channel_layout) {
+		if (f->avframe->channels == av_get_channel_layout_nb_channels(f->avframe->channel_layout))
+			channel_layout = f->avframe->channel_layout;
+		else
+			channel_layout = av_get_default_channel_layout(f->avframe->channels);
+	}
+	/* If the frame changed, we would reconstruct a new swr_ctx to fit the new frame */
+	if (channel_layout          != m->audio_frame_params.channel_layout ||
+			f->avframe->format      != m->audio_frame_params.sample_fmt     ||
+			f->avframe->sample_rate != m->audio_frame_params.sample_rate    ||
+			(f->avframe->nb_samples != wanted_nb_samples && !m->swr_ctx)) {
+		swr_free(&m->swr_ctx);
+		m->swr_ctx = swr_alloc_set_opts(NULL,
+																	  m->audio_dev_params.channel_layout,
+																		m->audio_dev_params.sample_fmt,
+																		m->audio_dev_params.sample_rate,
+																		channel_layout,
+																		f->avframe->format,
+																		f->avframe->sample_rate,
+																		0,
+																		NULL);
+		if (!m->swr_ctx || swr_init(m->swr_ctx) < 0) {
+			av_log(NULL,
+					   AV_LOG_ERROR,
+						 "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
+						 f->avframe->sample_rate,
+						 av_get_sample_fmt_name(f->avframe->format),
+						 f->avframe->channels,
+						 m->audio_dev_params.sample_rate,
+						 av_get_sample_fmt_name(m->audio_dev_params.sample_fmt),
+						 m->audio_dev_params.channels);
+			swr_free(&m->swr_ctx);
+			return -1;
+		}
+		/* update the m->audio_frame_params, which recorded the status of the newly created swr_ctx */
+		m->audio_frame_params.channel_layout = channel_layout;
+		m->audio_frame_params.channels       = f->avframe->channels;
+		m->audio_frame_params.sample_fmt     = f->avframe->format;
+		m->audio_frame_params.sample_rate    = f->avframe->sample_rate;
+	}
+
+	/* There is no necessary to do conversion if m->swr_ctx is NULL */
+	if (m->swr_ctx) {
+		return _audio_convert_frame(m, f, wanted_nb_samples);
+	}
+	m->audio_buf = f->avframe->data[0];
+	return av_samples_get_buffer_size(NULL, f->avframe->channels, f->avframe->nb_samples, f->avframe->format, 1);
+}
+
+/*
+ * Convert an audio-frame to be the playable format which is supported by the audio-device.
+ * Return the size in bytes of the audio-frame after successful conversion, otherwise,
+ * return a negative value.
+ */
 static int audio_decode_frame(exAVMedia *m) {
-	int data_size, resampled_data_size;
-	int64_t dec_channel_layout;
-	av_unused double audio_clock0;
-	int wanted_nb_samples;
-	exAVFrame *af = NULL;
+	int resampled_data_size;
+	exAVFrame *f = NULL;
 	struct list_head *n = NULL;
 
 	if (m->play_paused)
 		return -1;
+
+  /* get a valid frame */
 	do {
-#if defined(_WIN32)
-		while (m->aframes.list->count == 0) {
-			if ((av_gettime_relative() - m->audio_callback_time) > 1000000LL * m->audio_hw_buf_size / m->audio_dst.bytes_per_sec / 2)
+retry: /* try to get a frame */
+		n = m->aframes.list->pop_front(m->aframes.list);
+		if (n == NULL) {
+			if (audio_callback_wait_is_timeout(m))
 				return -1;
 			av_usleep(1000);
+			goto retry;
 		}
-#endif
-		if (!(n = m->aframes.list->pop_front(m->aframes.list)))
-			return -1;
-		af = list_entry(n, exAVFrame, list);
-	} while (af->serial != m->aframes.serial);
+		f = list_entry(n, exAVFrame, list);
+		if (m->aframes.last) {
+			m->aframes.last->put(m->aframes.last);
+			m->aframes.last = f;
+			f->get(f);
+		}
+	} while (f->serial != m->aframes.serial);
 
-	data_size = av_samples_get_buffer_size(NULL, af->avframe->channels, af->avframe->nb_samples, af->avframe->format, 1);
+	/* convert the frame to fit the opened audio-device */
+	if ((resampled_data_size = audio_convert_frame(m, f)) < 0)
+		return -1;
 
-	dec_channel_layout =
-		(af->avframe->channel_layout && af->avframe->channels == av_get_channel_layout_nb_channels(af->avframe->channel_layout)) ?
-		af->avframe->channel_layout : av_get_default_channel_layout(af->avframe->channels);
-	wanted_nb_samples = synchronize_audio(m, af->avframe->nb_samples);
-
-	if (af->avframe->format        != m->audio_src.fmt            ||
-			dec_channel_layout         != m->audio_src.channel_layout ||
-			af->avframe->sample_rate   != m->audio_src.freq           ||
-			(wanted_nb_samples != af->avframe->nb_samples && !m->swr_ctx)) {
-		swr_free(&m->swr_ctx);
-		m->swr_ctx = swr_alloc_set_opts(NULL,
-																	  m->audio_dst.channel_layout, m->audio_dst.fmt,    m->audio_dst.freq,
-																	  dec_channel_layout,          af->avframe->format, af->avframe->sample_rate,
-																	  0, NULL);
-		if (!m->swr_ctx || swr_init(m->swr_ctx) < 0) {
-			av_log(NULL, AV_LOG_ERROR,
-						 "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
-							af->avframe->sample_rate, av_get_sample_fmt_name(af->avframe->format), af->avframe->channels,
-							m->audio_dst.freq, av_get_sample_fmt_name(m->audio_dst.fmt), m->audio_dst.channels);
-			swr_free(&m->swr_ctx);
-			return -1;
-		}
-		m->audio_src.channel_layout = dec_channel_layout;
-		m->audio_src.channels       = af->avframe->channels;
-		m->audio_src.freq = af->avframe->sample_rate;
-		m->audio_src.fmt = af->avframe->format;
-	}
-
-	if (m->swr_ctx) {
-		const uint8_t **in = (const uint8_t **)af->avframe->extended_data;
-		uint8_t **out = &m->audio_out_buf;
-		int out_count = (int64_t)wanted_nb_samples * m->audio_dst.freq / af->avframe->sample_rate + 256;
-		int out_size  = av_samples_get_buffer_size(NULL, m->audio_dst.channels, out_count, m->audio_dst.fmt, 0);
-		int len2;
-		if (out_size < 0) {
-			av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size() failed\n");
-			return -1;
-		}
-		if (wanted_nb_samples != af->avframe->nb_samples) {
-			if (swr_set_compensation(m->swr_ctx, (wanted_nb_samples - af->avframe->nb_samples) * m->audio_dst.freq / af->avframe->sample_rate,
-															 wanted_nb_samples * m->audio_dst.freq / af->avframe->sample_rate) < 0) {
-				av_log(NULL, AV_LOG_ERROR, "swr_set_compensation() failed\n");
-				return -1;
-			}
-		}
-		av_fast_malloc(&m->audio_out_buf, (unsigned int *)&m->audio_out_buf_size, out_size);
-		if (!m->audio_out_buf)
-			return AVERROR(ENOMEM);
-		len2 = swr_convert(m->swr_ctx, out, out_count, in, af->avframe->nb_samples);
-		if (len2 < 0) {
-			av_log(NULL, AV_LOG_ERROR, "swr_convert() failed\n");
-			return -1;
-		}
-		if (len2 == out_count) {
-			av_log(NULL, AV_LOG_WARNING, "audio buffer is probably too small\n");
-			if (swr_init(m->swr_ctx) < 0)
-				swr_free(&m->swr_ctx);
-		}
-		m->audio_in_buf = m->audio_out_buf;
-		resampled_data_size = len2 * m->audio_dst.channels * av_get_bytes_per_sample(m->audio_dst.fmt);
-	}
-	else {
-		m->audio_in_buf = af->avframe->data[0];
-		resampled_data_size = data_size;
-	}
-
-	audio_clock0 = m->audio_clock;
 	/* update the audio clock with the pts */
-	if (!isnan(af->pts))
-		m->audio_clock = af->pts + (double) af->avframe->nb_samples / af->avframe->sample_rate;
+	if (!isnan(f->pts))
+		m->audio_clock = f->pts + (double) f->avframe->nb_samples / f->avframe->sample_rate;
 	else
 		m->audio_clock = NAN;
-	m->audio_clock_serial = af->serial;
-	af->put(af);
+	m->audio_clock_serial = f->serial;
+	f->put(f);
 	return resampled_data_size;
 }
 
-static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
+static void audio_callback(void *opaque, Uint8 *stream, int len) {
   exAVMedia *m = opaque;
-  int audio_size, len1;
+  exAVFrame *f = NULL;
+  int audio_size, bytes;
 
+  /* update callback_time */
   m->audio_callback_time = av_gettime_relative();
 
   while (len > 0) {
-		if (m->audio_in_buf_index >= m->audio_in_buf_size) {
-			 audio_size = audio_decode_frame(m);
-			 if (audio_size < 0) {
-					/* if error, just output silence */
-				 m->audio_in_buf = NULL;
-				 m->audio_in_buf_size = SDL_AUDIO_MIN_BUFFER_SIZE / m->audio_dst.frame_size * m->audio_dst.frame_size;
-			 }
-			 else {
-				 if (m->show_mode != SHOW_MODE_VIDEO)
-					 update_sample_display(m, (int16_t *)m->audio_in_buf, audio_size);
-				 m->audio_in_buf_size = audio_size;
-			 }
-			 m->audio_in_buf_index = 0;
+		if (m->audio_buf_index >= m->audio_buf_size) {
+			if (f) { /* free the frame has been played */
+				f->put(f);
+				f = NULL;
+			}
+		 audio_size = audio_decode_frame(m);
+		 if (audio_size < 0) {
+				/* if error, just output silence */
+			 m->audio_buf = NULL;
+			 m->audio_buf_size = SDL_AUDIO_MIN_BUFFER_SIZE / m->audio_dev_params.frame_size * m->audio_dev_params.frame_size;
+		 }
+		 else {
+			 if (m->show_mode != SHOW_MODE_VIDEO)
+				 update_sample_display(m, (int16_t *)m->audio_buf, audio_size);
+			 m->audio_buf_size = audio_size;
+		 }
+		 m->audio_buf_index = 0;
 		}
-		len1 = m->audio_in_buf_size - m->audio_in_buf_index;
-		if (len1 > len)
-			len1 = len;
-		if (!m->muted && m->audio_in_buf && m->volume == SDL_MIX_MAXVOLUME)
-			memcpy(stream, (uint8_t *)m->audio_in_buf + m->audio_in_buf_index, len1);
+		bytes = m->audio_buf_size - m->audio_buf_index;
+		if (bytes > len)
+			bytes = len;
+		if (!m->muted && m->audio_buf && m->volume == SDL_MIX_MAXVOLUME)
+			memcpy(stream, (uint8_t *)m->audio_buf + m->audio_buf_index, bytes);
 		else {
-			memset(stream, 0, len1);
-			if (!m->muted && m->audio_in_buf)
-					SDL_MixAudioFormat(stream, (uint8_t *)m->audio_in_buf + m->audio_in_buf_index, AUDIO_S16SYS, len1, m->volume);
+			memset(stream, 0, bytes);
+			if (!m->muted && m->audio_buf)
+				SDL_MixAudioFormat(stream, (uint8_t *)m->audio_buf + m->audio_buf_index, AUDIO_S16SYS, bytes, m->volume);
 		}
-		len -= len1;
-		stream += len1;
-		m->audio_in_buf_index += len1;
+		len -= bytes;
+		stream += bytes;
+		m->audio_buf_index += bytes;
   }
-  m->audio_write_buf_size = m->audio_in_buf_size - m->audio_in_buf_index;
+  m->audio_buf_write_size = m->audio_buf_size - m->audio_buf_index;
   /* Let's assume the audio driver that is used by SDL has two periods. */
   if (!isnan(m->audio_clock)) {
 		ex_av_clock_set_at(&m->audclk,
-								 m->audio_clock - (double)(2 * m->audio_hw_buf_size + m->audio_write_buf_size) / m->audio_dst.bytes_per_sec,
-								 m->audio_clock_serial,
-								 m->audio_callback_time / 1000000.0);
+								       m->audio_clock - (double)(2 * m->audio_dev_buf_size + m->audio_buf_write_size) / m->audio_dev_params.bytes_per_sec,
+								       m->audio_clock_serial,
+								       m->audio_callback_time / 1000000.0);
 		ex_av_clock_sync_to_slave(&m->extclk, &m->audclk);
   }
 }
@@ -237,10 +282,9 @@ static void audio_spec_init(exAVMedia *m) {
 	m->audio_spec.format = AUDIO_S16SYS;
 	m->audio_spec.silence = 0;
 	m->audio_spec.samples = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE, 2 << av_log2(m->audio_spec.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC));
-	//m->audio_spec.samples = 2 << av_log2(m->audio_frame_size);
 	m->audio_spec.userdata = m;
-	m->audio_spec.callback = sdl_audio_callback;
-	m->audio_dst.channel_layout = m->audio_channel_layout;
+	m->audio_spec.callback = audio_callback;
+	m->audio_dev_params.channel_layout = m->audio_channel_layout;
 }
 
 static int audio_open(exAVMedia *m) {
@@ -263,39 +307,36 @@ static int audio_open(exAVMedia *m) {
 				goto err;
 			}
 		}
-		m->audio_dst.channel_layout = av_get_default_channel_layout(m->audio_spec.channels);
+		m->audio_dev_params.channel_layout = av_get_default_channel_layout(m->audio_spec.channels);
 	}
 	if (spec.format != AUDIO_S16SYS) {
 		av_log(NULL, AV_LOG_ERROR, "SDL advised audio format %d is not supported!\n", spec.format);
 		goto err;
 	}
 	if (spec.channels != m->audio_spec.channels) {
-		m->audio_dst.channel_layout = av_get_default_channel_layout(spec.channels);
-		if (!m->audio_dst.channel_layout) {
+		m->audio_dev_params.channel_layout = av_get_default_channel_layout(spec.channels);
+		if (!m->audio_dev_params.channel_layout) {
 			av_log(NULL, AV_LOG_ERROR, "SDL advised channel count %d is not supported!\n", spec.channels);
 			goto err;
 		}
 	}
-	m->audio_dst.fmt = AV_SAMPLE_FMT_S16;
-	m->audio_dst.freq = spec.freq;
-	m->audio_dst.channels =  spec.channels;
-	m->audio_dst.frame_size = av_samples_get_buffer_size(NULL, m->audio_dst.channels, 1, m->audio_dst.fmt, 1);
-	m->audio_dst.bytes_per_sec = av_samples_get_buffer_size(NULL, m->audio_dst.channels, m->audio_dst.freq, m->audio_dst.fmt, 1);
-	if (m->audio_dst.bytes_per_sec <= 0 || m->audio_dst.frame_size <= 0) {
+	m->audio_dev_params.sample_fmt = AV_SAMPLE_FMT_S16;
+	m->audio_dev_params.sample_rate = spec.freq;
+	m->audio_dev_params.channels =  spec.channels;
+	m->audio_dev_params.frame_size = av_samples_get_buffer_size(NULL, m->audio_dev_params.channels, 1, m->audio_dev_params.sample_fmt, 1);
+	m->audio_dev_params.bytes_per_sec = av_samples_get_buffer_size(NULL, m->audio_dev_params.channels, m->audio_dev_params.sample_rate, m->audio_dev_params.sample_fmt, 1);
+	if (m->audio_dev_params.bytes_per_sec <= 0 || m->audio_dev_params.frame_size <= 0) {
 		av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size failed\n");
 		goto err;
 	}
-	m->audio_hw_buf_size = spec.size;
-	m->audio_src = m->audio_dst;
+	m->audio_dev_buf_size = spec.size;
+	m->audio_frame_params = m->audio_dev_params;
 	return 0;
 err:
 	return ret;
 }
 
 static void ex_av_media_prepare_play_audio(exAVMedia *m) {
-	m->audio_buffer = av_buffer_allocz(AUDIO_BUFFER_SIZE);
-	if (m->audio_buffer == NULL)
-		return;
 	audio_spec_init(m);
 }
 
@@ -316,12 +357,13 @@ static void ex_av_media_start_play_audio(exAVMedia *m) {
 }
 
 static void ex_av_media_prepare_stop_audio(exAVMedia *m) {
-	if (m->audio_buffer)
-		av_buffer_unref(&m->audio_buffer);
+	av_freep(m->audio_cache);
+	m->audio_cache_size = 0;
 }
 
 static void ex_av_media_stop_play_audio(exAVMedia *m) {
-
+	if (m->audio_dev > 0)
+		SDL_CloseAudioDevice(m->audio_dev);
 }
 
 static void ex_av_media_prepare_play_video(exAVMedia *m) {
@@ -350,6 +392,7 @@ static void ex_av_media_stop_play(exAVMedia *m) {
 		ex_av_media_stop_play_video(m);
 	}
 	m->play_started = 0;
+	SDL_Quit();
 }
 
 static void ex_av_media_start_play(exAVMedia *m) {
@@ -580,6 +623,14 @@ static void ex_av_media_free_frame_queue(exAVFrameQueue *q) {
 		q->list->put(q->list, ex_av_frame_free_list_entry);
 		q->list = NULL;
 	}
+	if (q->last) {
+		q->last->put(q->last);
+		q->last = NULL;
+	}
+	if (q->next) {
+		q->next->put(q->next);
+		q->next = NULL;
+	}
 }
 
 static void ex_av_media_free_caches(exAVMedia *m) {
@@ -763,6 +814,8 @@ static void ex_av_media_play(exAVMedia *m) {
 			m->start_decode(m);
 		if (!m->play_started)
 			m->start_play(m);
+		/* stop decode and play when finished playing */
+		m->stop(m);
 	}
 }
 
@@ -776,16 +829,16 @@ static void ex_av_media_stop(exAVMedia *m) {
 }
 
 static void ex_av_media_init_ops(exAVMedia *m) {
-	m->get = ex_av_media_get;
-	m->put = ex_av_media_put;
-	m->open  = _ex_av_media_open;
-	m->close = ex_av_media_close;
+	m->get          = ex_av_media_get;
+	m->put          = ex_av_media_put;
+	m->open         = _ex_av_media_open;
+	m->close        = ex_av_media_close;
 	m->start_decode = ex_av_media_start_decode;
 	m->stop_decode  = ex_av_media_stop_decode;
-	m->start_play  = ex_av_media_start_play;
-	m->stop_play = ex_av_media_stop_play;
-	m->play = ex_av_media_play;
-	m->stop = ex_av_media_stop;
+	m->start_play   = ex_av_media_start_play;
+	m->stop_play    = ex_av_media_stop_play;
+	m->play         = ex_av_media_play;
+	m->stop         = ex_av_media_stop;
 }
 
 static void ex_av_media_init_common(exAVMedia *m) {

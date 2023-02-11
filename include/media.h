@@ -69,11 +69,11 @@ typedef struct exAVFrameQueue {
 } exAVFrameQueue;
 
 typedef struct exAudioParams {
-    int freq;
+    int sample_rate;
     int channels;
-    int64_t channel_layout;
-    enum AVSampleFormat fmt;
+    enum AVSampleFormat sample_fmt;
     int frame_size;
+    int64_t channel_layout;
     int bytes_per_sec;
 } exAudioParams;
 
@@ -119,6 +119,7 @@ typedef struct exAVMedia {
 	/* Clocks */
 	double video_clock, audio_clock, external_clock;
 	exAVClock vidclk, audclk, extclk;
+	int audio_clock_serial;
 
 	/* for playing media */
 #if HAVE_SDL2
@@ -136,22 +137,24 @@ typedef struct exAVMedia {
 	int cursor_hidden;
 	int volume;
 	int64_t cursor_last_shown;
-	int64_t audio_callback_time;
-	int audio_hw_buf_size;
+
+
 	SDL_Window *window;
 	SDL_Renderer *renderer;
 	SDL_Texture *texture;
-	SDL_AudioDeviceID audio_dev;
-	SDL_AudioSpec audio_spec;
-	AVBufferRef *audio_buffer;
-	exAudioParams audio_src, audio_dst;
-	uint8_t *audio_out_buf, *audio_in_buf;
-	size_t audio_out_buf_size, audio_in_buf_size, audio_write_buf_size;
-	int audio_in_buf_index;
-	int audio_clock_serial;
+
 	int muted;
 	int16_t sample_array[SAMPLE_ARRAY_SIZE];
 	int sample_array_index;
+	SDL_AudioDeviceID audio_dev;
+	SDL_AudioSpec audio_spec;
+	int audio_dev_buf_size;
+	int64_t audio_callback_time;
+	int audio_callback_timeout_count;      /* callback_timeout_value = one_callback_time_length /  callback_timeout_count */
+	exAudioParams audio_dev_params, audio_frame_params;
+	uint8_t *audio_buf;                    /* point to audio-frame data which has been re-sampled */
+	uint8_t *audio_cache;                  /* used to re-sample audio frame, should be freed via av_freep when it is no longer used. */
+	size_t audio_buf_size, audio_buf_write_size, audio_buf_index, audio_cache_size;
 #endif
 
 	/* Context used to convert picture frame */
@@ -168,7 +171,7 @@ typedef struct exAVMedia {
 	/* Audio Stream informations */
 	int audio_sample_rate, audio_sample_fmt, audio_channels, audio_frame_size;
 	uint64_t audio_channel_layout;
-	AVRational audio_time_base, subtitle_time_base;
+	AVRational audio_time_base;
 	uint64_t audio_start_time;
 
 	/* Subtitle Stream informations */
