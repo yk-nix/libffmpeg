@@ -14,8 +14,311 @@
 
 #include <media.h>
 
+static exAVFrame *_ex_av_frame_queue_peek(exAVFrameQueue *q, int idx) {
+	exAVFrame *f = NULL;
+	struct list_head *n = q->list->peek(q->list, idx);
+	if (n) {
+		f = list_entry(n, exAVFrame, list);
+		f->get(f);
+	}
+	return f;
+}
+
+static inline exAVFrame *ex_av_frame_queue_peek(exAVFrameQueue *q) {
+	return _ex_av_frame_queue_peek(q, 0);
+}
+
+static inline exAVFrame *ex_av_frame_queue_peek_next(exAVFrameQueue *q) {
+	return _ex_av_frame_queue_peek(q, 1);
+}
+
+static exAVFrame *ex_av_frame_queue_pop(exAVFrameQueue *q) {
+	exAVFrame *f = NULL;
+	struct list_head *n = q->list->pop_front(q->list, 0);
+	if (n) {
+		f = list_entry(n, exAVFrame, list);
+	}
+	return f;
+}
 
 #if HAVE_SDL2
+static void calculate_display_rect(SDL_Rect *rect,
+                                   int scr_xleft, int scr_ytop,
+																	 int scr_width, int scr_height,
+                                   int pic_width, int pic_height,
+																	 AVRational pic_sar) {
+	AVRational aspect_ratio = pic_sar;
+	int64_t width, height, x, y;
+
+	if (av_cmp_q(aspect_ratio, av_make_q(0, 1)) <= 0)
+		aspect_ratio = av_make_q(1, 1);
+
+	aspect_ratio = av_mul_q(aspect_ratio, av_make_q(pic_width, pic_height));
+
+	/* XXX: we suppose the screen has a 1.0 pixel ratio */
+	height = scr_height;
+	width = av_rescale(height, aspect_ratio.num, aspect_ratio.den) & ~1;
+	if (width > scr_width) {
+		width = scr_width;
+		height = av_rescale(width, aspect_ratio.den, aspect_ratio.num) & ~1;
+	}
+	x = (scr_width - width) / 2;
+	y = (scr_height - height) / 2;
+	rect->x = scr_xleft + x;
+	rect->y = scr_ytop  + y;
+	rect->w = FFMAX((int)width,  1);
+	rect->h = FFMAX((int)height, 1);
+}
+
+static void set_default_window_size(exAVMedia *media) {
+	SDL_Rect rect;
+	int max_width  = media->screen_width  ? media->screen_width  : INT_MAX;
+	int max_height = media->screen_height ? media->screen_height : INT_MAX;
+	if (max_width == INT_MAX && max_height == INT_MAX)
+		max_height = media->video_height;
+	calculate_display_rect(&rect, 0, 0, max_width, max_height, media->video_width, media->video_height, media->video_sar);
+	media->screen_width  = media->window_default_width  = rect.w;
+	media->screen_height = media->window_default_height = rect.h;
+}
+
+static void video_image_display(exAVMedia *m, exAVFrame *f, double *remaining_time) {
+	SDL_Rect rect;
+	calculate_display_rect(&rect,
+													0, 0,
+													m->screen_width, m->screen_height,
+													m->video_width, m->video_height,
+													m->video_sar);
+	if (f)
+		sdl_update_texture(m->renderer, &m->texture, f->avframe, &m->sws_ctx);
+	SDL_ShowWindow(m->window);
+	SDL_SetRenderDrawColor(m->renderer, 0, 0, 0, 255);
+	SDL_RenderClear(m->renderer);
+	SDL_RenderCopyEx(m->renderer, m->texture, NULL, &rect, 0, NULL, m->flip ? SDL_FLIP_VERTICAL : 0);
+	SDL_RenderPresent(m->renderer);
+}
+
+static int get_master_sync_type(exAVMedia *m) {
+	if (m->av_sync_type == AV_SYNC_VIDEO_MASTER) {
+		if (m->video_idx >= 0)
+			return AV_SYNC_VIDEO_MASTER;
+		else
+			return AV_SYNC_AUDIO_MASTER;
+	}
+	else if (m->av_sync_type == AV_SYNC_AUDIO_MASTER) {
+		if (m->audio_idx >= 0)
+			return AV_SYNC_AUDIO_MASTER;
+		else
+			return AV_SYNC_EXTERNAL_CLOCK;
+	}
+	else {
+			return AV_SYNC_EXTERNAL_CLOCK;
+	}
+}
+
+double get_master_clock(exAVMedia *m) {
+	double val;
+	switch (get_master_sync_type(m)) {
+	case AV_SYNC_VIDEO_MASTER:
+		val = ex_av_clock_get(&m->video_clock);
+		break;
+	case AV_SYNC_AUDIO_MASTER:
+		val = ex_av_clock_get(&m->audio_clock);
+		break;
+	default:
+		val = ex_av_clock_get(&m->external_clock);
+		break;
+	}
+	return val;
+}
+
+static double frame_duration(exAVMedia *m, exAVFrame *last, exAVFrame *cur) {
+	if(last->serial != cur->serial)
+		return 0.0;
+  double duration = cur->pts - last->pts;
+	if (isnan(duration) || duration <= 0 || duration > m->max_frame_duration)
+		return last->duration;
+	else
+		return duration;
+}
+
+static double compute_target_delay(double delay, exAVMedia *m) {
+	double sync_threshold, diff = 0;
+
+	/* update delay to follow master synchronization source */
+	if (get_master_sync_type(m) != AV_SYNC_VIDEO_MASTER) {
+		/* if video is slave, we try to correct big delays by
+			 duplicating or deleting a frame */
+		diff = ex_av_clock_get(&m->video_avclock) - get_master_clock(m);
+
+		/* skip or repeat frame. We take into account the
+			 delay to compute the threshold. I still don't know
+			 if it is the best guess */
+		sync_threshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
+		if (!isnan(diff) && fabs(diff) < m->max_frame_duration) {
+			if (diff <= -sync_threshold)
+					delay = FFMAX(0, delay + diff);
+			else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD)
+					delay = delay + diff;
+			else if (diff >= sync_threshold)
+					delay = 2 * delay;
+		}
+	}
+	av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",	delay, -diff);
+
+	return delay;
+}
+
+static void update_video_avclock(exAVMedia *m, double pts, int64_t pos, int serial) {
+	/* update current video pts */
+	set_clock(&m->video_avclock, pts, serial);
+	sync_clock_to_slave(&m->external_avclock, &m->video_avclock);
+}
+
+static void video_refresh(exAVMedia *m, double *remaining_time) {
+	exAVFrame *f = NULL;
+	struct list_head *n =  NULL;
+	double now, last_duration, duration, delay;
+
+	if (m->paused)
+		goto refresh;
+
+retry:
+	if (m->vframes->list->size(m->vframes->list) == 0)
+		goto refresh;
+	n = m->vframes->list->pop_front(m->vframes);
+	f = list_entry(n, exAVFrame, list);
+	if (m->vframes->serial != f->serial) {
+		f->put(f);
+		goto retry;
+	}
+	if (m->vframes->last->serial != f->serial)
+		m->frame_timer = av_gettime_relative() / 1000000.0;
+	last_duration = frame_duration(m, m->vframes->last, f);
+	delay = compute_target_delay(last_duration, m);
+	now = av_gettime_relative()/1000000.0;
+	if (now < m->frame_timer + delay) {
+		*remaining_time = FFMIN(m->frame_timer + delay - now, *remaining_time);
+		goto refresh;
+	}
+	m->frame_timer += delay;
+	if (delay > 0 && now - m->frame_timer > AV_SYNC_THRESHOLD_MAX)
+		m->frame_timer = now;
+	if (!isnan(f->pts))
+		update_video_avclock(m, f->pts, f->pos, f->serial);
+	if (m->vframes->last)
+		m->vframes->last->put(m->vframes->last);
+	m->vframes->last = f;
+
+refresh:
+  video_image_display(m, m->vframes->last, remaining_time);
+}
+
+static void refresh_loop_wait_event(exAVMedia *media, SDL_Event *event) {
+	double remaining_time = 0.0;
+	SDL_PumpEvents();
+	while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
+		if (!media->cursor_hidden && av_gettime_relative() - media->cursor_last_shown > CURSOR_HIDE_DELAY) {
+			SDL_ShowCursor(0);
+			media->cursor_hidden = 1;
+		}
+		if (remaining_time > 0.0)
+			av_usleep((int64_t)(remaining_time * 1000000.0));
+		remaining_time = media->refresh_rate;
+		if (media->show_mode != SHOW_MODE_NONE && (!media->paused || media->force_refresh))
+			video_refresh(media, &remaining_time);
+		SDL_PumpEvents();
+	}
+}
+
+static void toggle_full_screen(exAVMedia *m) {
+    m->is_full_screen = !m->is_full_screen;
+    SDL_SetWindowFullscreen(m->window, m->is_full_screen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
+static int key_event_handler(exAVMedia *media, SDL_Event *event) {
+	return 0;
+}
+
+static int mouse_event_handler(exAVMedia *media, SDL_Event *event) {
+	if (event->type == SDL_MOUSEBUTTONDOWN) {
+		if (event->button.button == SDL_BUTTON_LEFT) {
+				static int64_t last_mouse_left_click = 0;
+				if (av_gettime_relative() - last_mouse_left_click <= 500000) {
+					toggle_full_screen(media);
+					media->force_refresh = 1;
+					last_mouse_left_click = 0;
+				}
+				else {
+					last_mouse_left_click = av_gettime_relative();
+				}
+			}
+	}
+	if (media->cursor_hidden) {
+			SDL_ShowCursor(1);
+			media->cursor_hidden = 0;
+	}
+	media->cursor_last_shown = av_gettime_relative();
+	return 0;
+}
+
+static void window_event_resize(exAVMedia *media, SDL_Event *event) {
+	if(event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+		media->screen_width  = event->window.data1;
+		media->screen_height = event->window.data2;
+		if (media->texture) {
+			SDL_DestroyTexture(media->texture);
+			media->texture = NULL;
+		}
+	}
+}
+
+static int window_event_handler(exAVMedia *media, SDL_Event *event) {
+	fflush(stdout);
+	switch (event->window.event) {
+	case SDL_WINDOWEVENT_SIZE_CHANGED:
+	case SDL_WINDOWEVENT_EXPOSED:
+		window_event_resize(media, event);
+		media->force_refresh = 1;
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static int quit_event_handler(exAVMedia *media, SDL_Event *event) {
+	return 1;
+}
+
+static int event_handlers(exAVMedia *media, SDL_Event *event) {
+	int ret = 0;
+	switch (event->type) {
+		case SDL_QUIT:
+			ret = quit_event_handler(media, event);
+			break;
+		case SDL_KEYDOWN:
+			ret = key_event_handler(media, event);
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEMOTION:
+			ret = mouse_event_handler(media, event);
+			break;
+		case SDL_WINDOWEVENT:
+			ret = window_event_handler(media, event);
+			break;
+		default:
+			break;
+		}
+	return ret;
+}
+
+static void event_loop(exAVMedia *media) {
+	SDL_Event event;
+	do {
+		refresh_loop_wait_event(media, &event);
+	} while(!event_handlers(media, &event));
+}
+
 static int synchronize_audio(exAVMedia *m, int nb_samples) {
 	int wanted_nb_samples = nb_samples;
 
@@ -203,7 +506,7 @@ retry: /* try to get a frame */
 	if ((resampled_data_size = audio_convert_frame(m, f)) < 0)
 		return -1;
 
-	/* update the audio clock with the pts */
+	/* update the audio clock with the PTS */
 	if (!isnan(f->pts))
 		m->audio_clock = f->pts + (double) f->avframe->nb_samples / f->avframe->sample_rate;
 	else
@@ -257,11 +560,11 @@ static void audio_callback(void *opaque, Uint8 *stream, int len) {
   m->audio_buf_write_size = m->audio_buf_size - m->audio_buf_index;
   /* Let's assume the audio driver that is used by SDL has two periods. */
   if (!isnan(m->audio_clock)) {
-		ex_av_clock_set_at(&m->audclk,
+		ex_av_clock_set_at(&m->audio_avclock,
 								       m->audio_clock - (double)(2 * m->audio_dev_buf_size + m->audio_buf_write_size) / m->audio_dev_params.bytes_per_sec,
 								       m->audio_clock_serial,
 								       m->audio_callback_time / 1000000.0);
-		ex_av_clock_sync_to_slave(&m->extclk, &m->audclk);
+		ex_av_clock_sync_to_slave(&m->external_avclock, &m->audio_avclock);
   }
 }
 
@@ -337,6 +640,7 @@ err:
 }
 
 static void ex_av_media_prepare_play_audio(exAVMedia *m) {
+	m->volume = 100;
 	audio_spec_init(m);
 }
 
@@ -367,15 +671,51 @@ static void ex_av_media_stop_play_audio(exAVMedia *m) {
 }
 
 static void ex_av_media_prepare_play_video(exAVMedia *m) {
+	m->flip = 0;
+	m->refresh_rate = 0.01;
+	m->cursor_hidden = 0;
+	m->window_default_width = 640;
+	m->window_default_height = 480;
+	m->screen_left = SDL_WINDOWPOS_CENTERED;
+	m->screen_top = SDL_WINDOWPOS_CENTERED;
+	set_default_window_size(m);
 
+	m->window = SDL_CreateWindow("meida-player",
+															 m->screen_left, m->screen_top,
+															 m->window_default_width, m->window_default_height,
+															 SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE);
+	m->renderer = SDL_CreateRenderer(m->window, -1, 0);
 }
 
 static void ex_av_media_start_play_video(exAVMedia *m) {
-
+	if (!m->window) {
+		av_log(NULL, AV_LOG_ERROR, "ex_av_media_start_play_video error: failed to create SDL_Window.\n");
+		return;
+	}
+	if (!m->renderer) {
+		av_log(NULL, AV_LOG_ERROR, "ex_av_media_start_play_video error: failed to create SDL_Renderer.\n");
+		return;
+	}
+	event_loop(m);
 }
 
 static void ex_av_media_prepare_stop_video(exAVMedia *m) {
-
+	if (m->window) {
+		SDL_DestroyWindow(m->window);
+		m->window = NULL;
+	}
+	if (m->renderer) {
+		SDL_DestroyRenderer(m->renderer);
+		m->renderer = NULL;
+	}
+	if (m->texture) {
+		SDL_DestroyTexture(m->texture);
+		m->texture = NULL;
+	}
+	if (m->sws_ctx) {
+		sws_freeContext(m->sws_ctx);
+		m->sws_ctx = NULL;
+	}
 }
 
 static void ex_av_media_stop_play_video(exAVMedia *m) {
@@ -847,17 +1187,7 @@ static void ex_av_media_init_common(exAVMedia *m) {
 	m->video_idx = -1;
 	m->audio_idx = -1;
 	m->subtitle_idx = -1;
-#if HAVE_SDL2
-	m->volume = 100;
 	m->av_sync_type = AV_SYNC_AUDIO_MASTER;
-	m->flip = 0;
-	m->refresh_rate = 0.01;
-	m->cursor_hidden = 0;
-	m->window_default_width = 640;
-	m->window_default_height = 480;
-	m->screen_left = SDL_WINDOWPOS_CENTERED;
-	m->screen_top = SDL_WINDOWPOS_CENTERED;
-#endif
 }
 
 static int ex_av_media_init(exAVMedia *m) {

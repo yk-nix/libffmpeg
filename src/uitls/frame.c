@@ -464,6 +464,9 @@ static int ex_av_frame_init(exAVFrame *f) {
 		return ret;
 	ret = pthread_rwlock_init(&f->rwlock, &rwlockattr);
 	pthread_rwlockattr_destroy(&rwlockattr);
+	if (f->avframe) {
+		f->
+	}
 	return ret;
 }
 

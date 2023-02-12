@@ -39,11 +39,11 @@ enum {
 /* maximum audio speed change to get correct sync */
 #define SAMPLE_CORRECTION_PERCENT_MAX 10
 
-/* NOTE: the size must be big enough to compensate the hardware audio buffersize size */
-/* TODO: We assume that a decoded and resampled frame fits into this buffer */
+/* NOTE: the size must be big enough to compensate the hardware audio buffe-rsize size */
+/* TODO: We assume that a decoded and re-sampled frame fits into this buffer */
 #define SAMPLE_ARRAY_SIZE (8 * 65536)
 
-/* external clock speed adjustment constants for realtime sources based on buffer fullness */
+/* external clock speed adjustment constants for real-time sources based on buffer fullness */
 #define EXTERNAL_CLOCK_SPEED_MIN  0.900
 #define EXTERNAL_CLOCK_SPEED_MAX  1.010
 #define EXTERNAL_CLOCK_SPEED_STEP 0.001
@@ -64,7 +64,7 @@ typedef struct exAVPacketQueue {
 
 typedef struct exAVFrameQueue {
 	struct list *list;
-	exAVFrame *last, *next;
+	exAVFrame *last;
 	int serial;
 } exAVFrameQueue;
 
@@ -108,7 +108,7 @@ typedef struct exAVMedia {
 	AVFormatContext *ic;
 
 	/* Flags */
-	int decode_started, play_started, play_paused;
+	int decode_started, play_started, play_paused, paused;
 
 	/* Indexes of those streams opened; valid >= 0  and  invalid < 0 */
 	int video_idx, audio_idx, subtitle_idx;
@@ -118,8 +118,9 @@ typedef struct exAVMedia {
 
 	/* Clocks */
 	double video_clock, audio_clock, external_clock;
-	exAVClock vidclk, audclk, extclk;
+	exAVClock video_avclock, audio_avclock, external_avclock;
 	int audio_clock_serial;
+	int av_sync_type;
 
 	/* for playing media */
 #if HAVE_SDL2
@@ -131,19 +132,19 @@ typedef struct exAVMedia {
 	int play_flags;
 	int window_default_width, window_default_height;
 	int screen_left, screen_top, screen_width, screen_height;
-	int flip;
-	int av_sync_type;
+	int flip, is_full_screen;
+	int force_refresh;
 	double refresh_rate;
 	int cursor_hidden;
-	int volume;
 	int64_t cursor_last_shown;
-
+	double frame_timer;
+	double max_frame_duration;
 
 	SDL_Window *window;
 	SDL_Renderer *renderer;
 	SDL_Texture *texture;
 
-	int muted;
+	int muted, volume;
 	int16_t sample_array[SAMPLE_ARRAY_SIZE];
 	int sample_array_index;
 	SDL_AudioDeviceID audio_dev;
