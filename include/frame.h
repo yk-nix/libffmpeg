@@ -92,18 +92,6 @@ typedef struct exAVFrame {
 	atomic_t refcount;
 	pthread_rwlock_t rwlock;
 
-	AVSubtitle sub;
-	int serial;
-	double pts;                        /* presentation timestamp for the frame */
-	double duration;                   /* estimated duration of the frame */
-	int64_t pos;                       /* byte position of the frame in the input file */
-	int width;
-	int height;
-	int format;
-	AVRational sar;
-	int uploaded;
-	int flip_v;
-
 	struct exAVFrame *(*get)(struct exAVFrame *self);
 	void (*put)(struct exAVFrame *self);
 	int (*save)(struct exAVFrame *self, const char *url);
@@ -113,10 +101,11 @@ typedef struct exAVFrame {
 } exAVFrame;
 
 /*
- * Allocate a frame.
+ * Allocate a frame with specified size. The 'size' must be greater than the
+ * value of 'sizeof(exAVFrame)', otherwise, the size will be set as it.
  * Return NULL if failed, otherwise, return the newly allocated frame.
  */
-extern exAVFrame *ex_av_frame_alloc(void);
+extern exAVFrame *ex_av_frame_alloc(size_t size);
 
 /*
  * Same as 'av_frame_load_picture', but return frame of type of 'exAVFrame'.

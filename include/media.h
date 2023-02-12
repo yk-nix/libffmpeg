@@ -166,7 +166,7 @@ typedef struct exAVMedia {
 
 	/* Video Stream informations */
 	int video_width, video_height, video_pix_fmt;
-	AVRational video_sar, video_time_base;
+	AVRational video_sar, video_time_base, video_frame_rate;
 	uint64_t video_start_time;
 
 	/* Audio Stream informations */

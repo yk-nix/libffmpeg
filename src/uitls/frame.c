@@ -464,15 +464,14 @@ static int ex_av_frame_init(exAVFrame *f) {
 		return ret;
 	ret = pthread_rwlock_init(&f->rwlock, &rwlockattr);
 	pthread_rwlockattr_destroy(&rwlockattr);
-	if (f->avframe) {
-		f->
-	}
 	return ret;
 }
 
-exAVFrame *ex_av_frame_alloc(void) {
+exAVFrame *ex_av_frame_alloc(size_t size) {
 	exAVFrame *f = NULL;
-	f = calloc(1, sizeof(exAVFrame));
+	if (size < sizeof(exAVFrame))
+		size = sizeof(exAVFrame);
+	f = calloc(1, size);
 	if (f == NULL)
 		goto err0;
 	f->avframe = av_frame_alloc();

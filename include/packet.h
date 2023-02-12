@@ -22,17 +22,16 @@ typedef struct exAVPacket {
 	pthread_rwlock_t rwlock;
 	atomic_t refcount;
 
-	int serial;
-
 	struct exAVPacket *(*get)(struct exAVPacket *self);
 	void (*put)(struct exAVPacket *self);
 } exAVPacket;
 
 /*
- * Allocate a packet.
+ * Allocate a packet with specified size. If 'size' must be greater than
+ * the value of 'sizeof(exAVPacket)', otherwise, the size will be set as it.
  * Return NULL if failed, otherwise, return the newly allocated packet.
  */
-extern exAVPacket *ex_av_packet_alloc(void);
+extern exAVPacket *ex_av_packet_alloc(size_t size);
 
 /*
  * Delete the packet from the list, and do 'put' operation on this packet.

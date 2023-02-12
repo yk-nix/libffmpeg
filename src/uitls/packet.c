@@ -42,7 +42,6 @@ static int ex_av_packet_init(exAVPacket *p) {
 	int ret = -1;
 	INIT_LIST_HEAD(&p->list);
 	atomic_set(&p->refcount, 1);
-	p->serial = -1;
 	ex_av_packet_ops_init(p);
 	pthread_rwlockattr_t rwlockattr;
 	if(pthread_rwlockattr_init(&rwlockattr))
@@ -52,9 +51,11 @@ static int ex_av_packet_init(exAVPacket *p) {
 	return ret;
 }
 
-exAVPacket *ex_av_packet_alloc(void) {
+exAVPacket *ex_av_packet_alloc(size_t size) {
 	exAVPacket *p = NULL;
-	p = calloc(1, sizeof(exAVPacket));
+	if (size < sizeof(exAVPacket))
+		size = sizeof(exAVPacket);
+	p = calloc(1, size);
 	if (p == NULL)
 		goto err0;
 	p->avpkt = av_packet_alloc();
@@ -67,6 +68,7 @@ err1:
 err0:
 	return NULL;
 }
+
 
 void ex_av_packet_free_list_entry(struct list_head *n) {
 	exAVPacket *self = list_entry(n, exAVPacket, list);
