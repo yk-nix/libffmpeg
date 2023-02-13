@@ -8,16 +8,16 @@
 #include <pthread.h>
 
 #include <libavutil/time.h>
+#include <libavutil/common.h>
 #include <libswresample/swresample.h>
 #include <libavutil/error.h>
 #include <libavutil/avstring.h>
 
-#define EVENT_HANDLER_RESULT_EXIT  1
-#define EVENT_HANDLER_RESULT_OK    0
+#define EVENT_HANDLER_RESULT_EXIT   1
+#define EVENT_HANDLER_RESULT_OK     0
 #define EVENT_HANDLER_REUSLT_ERROR -1
 
 #include <media.h>
-extern int sdl_update_texture(SDL_Renderer *render, SDL_Texture **tex, AVFrame *frame, struct SwsContext **img_convert_ctx);
 
 typedef struct exFFFrame {
 	exAVFrame frame;
@@ -39,6 +39,7 @@ typedef struct exFFPacket {
 	int serial;
 } exFFPacket;
 
+#if HAVE_SDL2
 static exFFFrame *to_exffframe(exAVMedia *m, exAVFrame *f, enum AVMediaType type) {
 	exFFFrame *ff = (exFFFrame *)f;
 	ff->serial = m->vframes.serial;
@@ -83,7 +84,8 @@ static exAVFrame *ex_av_frame_queue_pop(exAVFrameQueue *q) {
 	return f;
 }
 
-#if HAVE_SDL2
+extern int sdl_update_texture(SDL_Renderer *render, SDL_Texture **tex, AVFrame *frame, struct SwsContext **img_convert_ctx);
+
 static void calculate_display_rect(SDL_Rect *rect,
                                    int scr_xleft, int scr_ytop,
 																	 int scr_width, int scr_height,
@@ -289,10 +291,36 @@ static void toggle_pause(exAVMedia *m) {
   m->paused = m->audio_avclock.paused = m->video_avclock.paused = m->external_avclock.paused = !m->paused;
 }
 
+static void update_volume(exAVMedia *m, int sign, double step) {
+	double volume_level = m->volume ? (20 * log(m->volume / (double)SDL_MIX_MAXVOLUME) / log(10)) : -1000.0;
+	int new_volume = lrint(SDL_MIX_MAXVOLUME * pow(10.0, (volume_level + sign * step) / 20.0));
+	m->volume = av_clip(m->volume == new_volume ? (m->volume + sign) : new_volume, 0, SDL_MIX_MAXVOLUME);
+}
+
+static void update_start_time(exAVMedia *m, int is_add) {
+	if (is_add)
+		m->start_time = get_master_clock(m) + m->seek_step;
+	else
+		m->start_time = get_master_clock(m) - m->seek_step;
+	m->seek_requested = 1;
+}
+
 static int key_event_handler(exAVMedia *m, SDL_Event *e) {
 	switch (e->key.keysym.sym) {
 	case SDLK_SPACE:
 		toggle_pause(m);
+		break;
+	case SDLK_KP_MULTIPLY:
+		update_volume(m, 1, SDL_VOLUME_STEP);
+		break;
+	case SDLK_KP_DIVIDE:
+		update_volume(m, -1, SDL_VOLUME_STEP);
+		break;
+	case SDLK_LEFT:
+		update_start_time(m, 0);
+		break;
+	case SDLK_RIGHT:
+		update_start_time(m, 1);
 		break;
 	default:
 		break;
@@ -840,12 +868,56 @@ static inline int insert_packet(exAVPacket *pkt, struct list *list) {
 	return 0;
 }
 
+static int do_seek(exAVMedia *m) {
+	int ret = 0;
+	int64_t seek_target = av_clip64(m->start_time * AV_TIME_BASE, 0, INT64_MAX);
+	int64_t seek_min    = m->seek_rel > 0 ? seek_target - m->seek_rel + 2: INT64_MIN;
+	int64_t seek_max    = m->seek_rel < 0 ? seek_target - m->seek_rel - 2: INT64_MAX;
+	if ((ret = avformat_seek_file(m->ic, -1, seek_min, seek_target, seek_max, m->seek_flags)) < 0) {
+		av_log(NULL, AV_LOG_ERROR, "avformat_seek_file error: %s\n", av_err2str(ret));
+		return ret;
+	}
+	else {
+		if (m->audio_idx >= 0) {
+			m->apackets.list->clear(m->apackets.list, ex_av_packet_free_list_entry);
+			m->apackets.serial++;
+			m->aframes.list->clear(m->aframes.list, ex_av_frame_free_list_entry);
+			m->aframes.serial++;
+		}
+		if (m->subtitle_idx >= 0) {
+			m->spackets.list->clear(m->spackets.list, ex_av_packet_free_list_entry);
+			m->spackets.serial++;
+			m->sframes.list->clear(m->sframes.list, ex_av_frame_free_list_entry);
+			m->sframes.serial++;
+		}
+		if (m->video_idx >= 0) {
+			m->vpackets.list->clear(m->vpackets.list, ex_av_packet_free_list_entry);
+			m->vpackets.serial++;
+			m->vframes.list->clear(m->vframes.list, ex_av_frame_free_list_entry);
+			m->vframes.serial++;
+		}
+		if (m->seek_flags & AVSEEK_FLAG_BYTE) {
+			ex_av_clock_set(&m->external_avclock, NAN, 0);
+		}
+		else {
+			ex_av_clock_set(&m->external_avclock, seek_target / (double)AV_TIME_BASE, 0);
+		}
+	}
+	m->seek_requested = 0;
+	return 0;
+}
+
 /*
  * Grab a packet and insert it into the list if success.
  */
 static int grab_packet(exAVMedia *m) {
 	int ret = -1;
 	struct list *pkt_list = NULL;
+
+	if (m->seek_requested)
+		if (do_seek(m))
+			return -1;
+
 	exAVPacket *pkt = ex_av_packet_alloc(sizeof(exFFPacket));
 	exFFPacket *ffpkt = (exFFPacket *)pkt;
 	if (pkt == NULL) {
@@ -1073,21 +1145,27 @@ static void ex_av_media_stop_decode(exAVMedia *m) {
 	pthread_join(m->video_decoder, NULL);
 	pthread_join(m->audio_decoder, NULL);
 	pthread_join(m->subtitle_decoder, NULL);
-	m->start_decode = 0;
+	m->decode_started = 0;
 }
 
 static void ex_av_media_start_decode(exAVMedia *m) {
 	/* The media is not yet opened */
 	if (m->ic == NULL)
 		return;
+	pthread_attr_t attr;
+	if (pthread_attr_init(&attr))
+		return;
+	if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+		return;
+
 	/* Start up packet-grabber and decoders */
-	pthread_create(&m->packet_grabber, NULL, packet_grabber, m);
+	pthread_create(&m->packet_grabber, &attr, packet_grabber, m);
 	if (m->video_idx >= 0)
-		pthread_create(&m->video_decoder, NULL, video_decoder, m);
+		pthread_create(&m->video_decoder, &attr, video_decoder, m);
 	if (m->audio_idx >= 0)
-		pthread_create(&m->audio_decoder, NULL, audio_decoder, m);
+		pthread_create(&m->audio_decoder, &attr, audio_decoder, m);
 	if (m->subtitle_idx >= 0)
-		pthread_create(&m->subtitle_decoder, NULL, subtitle_decoder, m);
+		pthread_create(&m->subtitle_decoder, &attr, subtitle_decoder, m);
 	m->decode_started = 1;
 }
 
@@ -1169,7 +1247,7 @@ static int _ex_av_media_open(exAVMedia *m, const char *url, int open_flags) {
 
 	if (m->ic) {
 		/* The media is already opened */
-		if (m->url && !strcmp(m->url, url))
+		if (m->ic->url && !strcmp(m->ic->url, url))
 			return 0;
 		m->close(m);
 	}
@@ -1193,9 +1271,17 @@ err0:
 	return ret;
 }
 
+static void ex_av_media_stop(exAVMedia *m) {
+	if (m->ic) {
+		if (m->play_started)
+			m->stop_play(m);
+		if (m->decode_started)
+			m->stop_decode(m);
+	}
+}
+
 static void ex_av_media_close(exAVMedia *m) {
-	ex_av_media_stop_play(m);
-	ex_av_media_stop_decode(m);
+	ex_av_media_stop(m);
 	if (m->ic) {
 		ex_av_media_free_caches(m);
 		avformat_close_input(&m->ic);
@@ -1228,19 +1314,15 @@ static void ex_av_media_play(exAVMedia *m) {
 	if (m->ic) {
 		if (!m->decode_started)
 			m->start_decode(m);
+		else if (ex_av_media_packet_grabber_stopped(m) &&
+						 ex_av_media_video_decoder_stopped(m)  &&
+						 ex_av_media_audio_decoder_stopped(m)  &&
+						 ex_av_media_subtitle_decoder_stopped(m))
+			m->start_decode(m);
 		if (!m->play_started)
 			m->start_play(m);
 		/* stop decode and play when finished playing */
 		m->stop(m);
-	}
-}
-
-static void ex_av_media_stop(exAVMedia *m) {
-	if (m->ic) {
-		if (m->play_started)
-			m->stop_play(m);
-		if (m->decode_started)
-			m->stop_decode(m);
 	}
 }
 
@@ -1268,6 +1350,7 @@ static void ex_av_media_init_common(exAVMedia *m) {
 	ex_av_clock_init(&m->audio_avclock);
 	ex_av_clock_init(&m->video_avclock);
 	ex_av_clock_init(&m->external_avclock);
+	m->seek_step = 30.0;
 }
 
 static int ex_av_media_init(exAVMedia *m) {
@@ -1303,6 +1386,5 @@ exAVMedia *ex_av_media_open(const char *url, int flags) {
 		m->put(m);
 		return NULL;
 	}
-	m->url = av_strdup(url);
 	return m;
 }

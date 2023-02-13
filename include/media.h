@@ -81,7 +81,6 @@ typedef struct exAVMedia {
 	struct list_head list;
 	atomic_t refcount;
 	pthread_rwlock_t rwlock;
-	const char *url;
 
 	/* Operations */
 	void (*play)(struct exAVMedia *self);
@@ -117,6 +116,13 @@ typedef struct exAVMedia {
 
 	/* Threads for decoding this opened media */
 	pthread_t packet_grabber, video_decoder, audio_decoder, subtitle_decoder;
+
+	/* Used to seek file */
+	int seek_flags, seek_requested, seek_rel;
+	double seek_step;
+
+	/* The start point of this media would be decoded. Uinit: second */
+	double start_time;
 
 	/* Clocks */
 	double video_clock, audio_clock, external_clock;
