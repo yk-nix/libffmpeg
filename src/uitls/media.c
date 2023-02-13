@@ -40,6 +40,11 @@ typedef struct exFFPacket {
 } exFFPacket;
 
 #if HAVE_SDL2
+static void set_window_size(exAVMedia *m, size_t width, size_t height) {
+	m->screen_width = width;
+	m->screen_height = height;
+}
+
 static exFFFrame *to_exffframe(exAVMedia *m, exAVFrame *f, enum AVMediaType type) {
 	exFFFrame *ff = (exFFFrame *)f;
 	ff->serial = m->vframes.serial;
@@ -524,12 +529,10 @@ static int audio_convert_frame(exAVMedia *m, exAVFrame *f) {
 	int64_t channel_layout;
 	int wanted_nb_samples = synchronize_audio(m, f->avframe->nb_samples);
 
-	if (f->avframe->channel_layout) {
-		if (f->avframe->channels == av_get_channel_layout_nb_channels(f->avframe->channel_layout))
-			channel_layout = f->avframe->channel_layout;
-		else
-			channel_layout = av_get_default_channel_layout(f->avframe->channels);
-	}
+	if (f->avframe->channel_layout && f->avframe->channels == av_get_channel_layout_nb_channels(f->avframe->channel_layout))
+		channel_layout = f->avframe->channel_layout;
+	else
+		channel_layout = av_get_default_channel_layout(f->avframe->channels);
 	/* If the frame changed, we would reconstruct a new swr_ctx to fit the new frame */
 	if (channel_layout          != m->audio_frame_params.channel_layout ||
 			f->avframe->format      != m->audio_frame_params.sample_fmt     ||
@@ -691,6 +694,7 @@ static int audio_open(exAVMedia *m) {
 	while (next_sample_rate_idx && next_sample_rates[next_sample_rate_idx] >= m->audio_spec.freq)
 		next_sample_rate_idx--;
 	while (!(m->audio_dev = SDL_OpenAudioDevice(NULL, 0, &m->audio_spec, &spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
+	//while (!(m->audio_dev = SDL_OpenAudioDevice(NULL, 0, &m->audio_spec, &spec, SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
 		av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n",
 				m->audio_spec.channels, m->audio_spec.freq, SDL_GetError());
 		m->audio_spec.channels = next_nb_channels[FFMIN(7, m->audio_spec.channels)];
@@ -740,7 +744,6 @@ static void ex_av_media_prepare_play_audio(exAVMedia *m) {
 }
 
 static void ex_av_media_start_play_audio(exAVMedia *m) {
-	audio_spec_init(m);
 	if (audio_open(m))
 		return;
 	/*
@@ -950,6 +953,7 @@ static int grab_packet(exAVMedia *m) {
 
 static void run_grabber_routine(exAVMedia *m) {
 	while (!grab_packet(m));
+	pthread_detach(pthread_self());
 }
 
 /*
@@ -1070,6 +1074,7 @@ err2:
 err1:
 	avcodec_free_context(&codec_ctx);
 err0:
+	pthread_detach(pthread_self());
 	return;
 }
 
@@ -1152,20 +1157,15 @@ static void ex_av_media_start_decode(exAVMedia *m) {
 	/* The media is not yet opened */
 	if (m->ic == NULL)
 		return;
-	pthread_attr_t attr;
-	if (pthread_attr_init(&attr))
-		return;
-	if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
-		return;
 
 	/* Start up packet-grabber and decoders */
-	pthread_create(&m->packet_grabber, &attr, packet_grabber, m);
+	pthread_create(&m->packet_grabber, NULL, packet_grabber, m);
 	if (m->video_idx >= 0)
-		pthread_create(&m->video_decoder, &attr, video_decoder, m);
+		pthread_create(&m->video_decoder, NULL, video_decoder, m);
 	if (m->audio_idx >= 0)
-		pthread_create(&m->audio_decoder, &attr, audio_decoder, m);
+		pthread_create(&m->audio_decoder, NULL, audio_decoder, m);
 	if (m->subtitle_idx >= 0)
-		pthread_create(&m->subtitle_decoder, &attr, subtitle_decoder, m);
+		pthread_create(&m->subtitle_decoder, NULL, subtitle_decoder, m);
 	m->decode_started = 1;
 }
 
@@ -1337,6 +1337,9 @@ static void ex_av_media_init_ops(exAVMedia *m) {
 	m->stop_play    = ex_av_media_stop_play;
 	m->play         = ex_av_media_play;
 	m->stop         = ex_av_media_stop;
+#if HAVE_SDL2
+	m->set_window_size = set_window_size;
+#endif
 }
 
 static void ex_av_media_init_common(exAVMedia *m) {

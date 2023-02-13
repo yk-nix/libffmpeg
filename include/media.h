@@ -130,8 +130,12 @@ typedef struct exAVMedia {
 	int audio_clock_serial;
 	int av_sync_type;
 
-	/* for playing media */
+	/* For playing media */
 #if HAVE_SDL2
+	/* Operations to set those parameters */
+	void (*set_window_size)(struct exAVMedia *m, size_t wdith, size_t height);
+
+
 	enum ShowMode {
 		SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
 	} show_mode;
