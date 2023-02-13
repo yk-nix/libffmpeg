@@ -16,21 +16,21 @@ double ex_av_clock_get(exAVClock *c) {
 		return c->pts;
 	}
 	else {
-		double time = av_gettime_relative() / 1000000.0;
-		return c->pts_drift + time - (time - c->last_updated) * (1.0 - c->speed);
+		double now = av_gettime_relative() / 1000000.0;
+		return c->pts_drift + now - (now - c->last_updated) * (1.0 - c->speed);
 	}
 }
 
-void ex_av_clock_set_at(exAVClock *c, double pts, int serial, double time) {
+void ex_av_clock_set_at(exAVClock *c, double pts, int serial, double last_updated) {
 	c->pts = pts;
-	c->last_updated = time;
-	c->pts_drift = c->pts - time;
+	c->last_updated = last_updated;
+	c->pts_drift = c->pts - last_updated;
 	c->serial = serial;
 }
 
 void ex_av_clock_set(exAVClock *c, double pts, int serial) {
-	double time = av_gettime_relative() / 1000000.0;
-	ex_av_clock_set_at(c, pts, serial, time);
+	double now = av_gettime_relative() / 1000000.0;
+	ex_av_clock_set_at(c, pts, serial, now);
 }
 
 void ex_av_clock_set_speed(exAVClock *c, double speed) {

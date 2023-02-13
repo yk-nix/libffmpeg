@@ -20,7 +20,7 @@ typedef struct exAVClock {
 } exAVClock;
 
 double ex_av_clock_get(exAVClock *c);
-void ex_av_clock_set_at(exAVClock *c, double pts, int serial, double time);
+void ex_av_clock_set_at(exAVClock *c, double pts, int serial, double last_updated);
 void ex_av_clock_set(exAVClock *c, double pts, int serial);
 void ex_av_clock_init(exAVClock *c);
 void ex_av_clock_sync_to_slave(exAVClock *c, exAVClock *slave);

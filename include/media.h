@@ -97,10 +97,12 @@ typedef struct exAVMedia {
 	void (*close)(struct exAVMedia *self);                                    /* close the media file */
 
 	/* Caches */
-#define PACKET_QUEUE_SIZE  128
-#define VIDEO_PICTURE_QUEUE_SIZE 3
+#define VIDEO_PACKET_QUEUE_SIZE  32
+#define VIDEO_PICTURE_QUEUE_SIZE 32
+#define SUBTITLE_PACKET_QUEUE_SIZE 16
 #define SUBTITLE_PICTURE_QUEUE_SIZE 16
-#define AUDIO_SAMPLE_QUEUE_SIZE 64
+#define AUDIO_PACKET_QUEUE_SIZE 128
+#define AUDIO_SAMPLE_QUEUE_SIZE 128
 	exAVPacketQueue vpackets, apackets, spackets;
 	exAVFrameQueue vframes, aframes, sframes;
 
@@ -108,7 +110,7 @@ typedef struct exAVMedia {
 	AVFormatContext *ic;
 
 	/* Flags */
-	int decode_started, play_started, play_paused, paused;
+	int decode_started, play_started, paused;
 
 	/* Indexes of those streams opened; valid >= 0  and  invalid < 0 */
 	int video_idx, audio_idx, subtitle_idx;
@@ -130,6 +132,7 @@ typedef struct exAVMedia {
 # define CURSOR_HIDE_DELAY 1000000    /* hide cursor after 1 second with there is no any operations */
 # define AUDIO_BUFFER_SIZE  192000
 	int play_flags;
+
 	int window_default_width, window_default_height;
 	int screen_left, screen_top, screen_width, screen_height;
 	int flip, is_full_screen;
