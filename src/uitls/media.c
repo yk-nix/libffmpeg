@@ -859,6 +859,17 @@ static void ex_av_media_start_play(exAVMedia *m) {}
 static void ex_av_media_stop_play(exAVMedia *m) {}
 #endif
 
+static int media_is_decoding (exAVMedia *m) {
+	if (m->decode_started)
+		return 1;
+	if (!(ex_av_media_packet_grabber_stopped(m) &&
+		    ex_av_media_video_decoder_stopped(m)  &&
+		    ex_av_media_audio_decoder_stopped(m)  &&
+		    ex_av_media_subtitle_decoder_stopped(m)))
+		return 1;
+	return 0;
+}
+
 static inline int skip_packet(exAVPacket *pkt, struct list *list) {
 	pkt->put(pkt);
 	return 0;
@@ -1288,6 +1299,64 @@ static void ex_av_media_close(exAVMedia *m) {
 	}
 }
 
+static AVStream *create_output_stream(AVFormatContext *oc, const char *url, enum AVMediaType type) {
+	enum AVCodecID id = av_guess_codec(oc->oformat, NULL, url, NULL, type);
+	AVCodec *codec = avcodec_find_encoder(id);
+	if (codec) {
+		return avformat_new_stream(oc, codec);
+	}
+	return NULL;
+}
+
+static int _ex_av_meda_save_as(exAVMedia *m, AVFormatContext *oc, AVStream *as, AVStream *vs, AVStream *ss) {
+	if (!media_is_decoding(m))
+		m->start_decode(m);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	return 0;
+}
+
+static int ex_av_media_save_as(exAVMedia *m, const char *url) {
+	int ret = 0;
+	AVFormatContext *oc = NULL;
+	AVStream *as, *vs, *ss;
+	if ((ret = avformat_alloc_output_context2(&oc, NULL, NULL, url)) < 0) {
+		av_log(NULL, AV_LOG_ERROR, "ex_av_media_save_as: avformat_alloc_output_context2 error: %s\n", av_err2str(ret));
+		goto err0;
+	}
+	if (m->audio_idx >= 0)
+		as = create_output_stream(oc, url, AVMEDIA_TYPE_AUDIO);
+	if (m->video_idx >= 0)
+		vs = create_output_stream(oc, url, AVMEDIA_TYPE_VIDEO);
+	if (m->subtitle_idx >= 0)
+		ss = create_output_stream(oc, url, AVMEDIA_TYPE_SUBTITLE);
+
+	ret = _ex_av_meda_save_as(m, oc, as, vs, ss);
+
+	avformat_free_context(oc);
+err0:
+	return ret;
+}
+
 static exAVMedia *ex_av_media_get(exAVMedia *self) {
 	if (atomic_inc_and_test(&self->refcount)) {
 		/* the media is being released */
@@ -1312,12 +1381,7 @@ static void ex_av_media_put(exAVMedia *self) {
 
 static void ex_av_media_play(exAVMedia *m) {
 	if (m->ic) {
-		if (!m->decode_started)
-			m->start_decode(m);
-		else if (ex_av_media_packet_grabber_stopped(m) &&
-						 ex_av_media_video_decoder_stopped(m)  &&
-						 ex_av_media_audio_decoder_stopped(m)  &&
-						 ex_av_media_subtitle_decoder_stopped(m))
+		if (!media_is_decoding(m))
 			m->start_decode(m);
 		if (!m->play_started)
 			m->start_play(m);
@@ -1337,6 +1401,7 @@ static void ex_av_media_init_ops(exAVMedia *m) {
 	m->stop_play    = ex_av_media_stop_play;
 	m->play         = ex_av_media_play;
 	m->stop         = ex_av_media_stop;
+	m->save_as      = ex_av_media_save_as;
 #if HAVE_SDL2
 	m->set_window_size = set_window_size;
 #endif

@@ -94,6 +94,7 @@ typedef struct exAVMedia {
 	void (*put)(struct exAVMedia *self);
 	int (*open)(struct exAVMedia *self, const char *url, int open_flags);     /* open the 'url' media file */
 	void (*close)(struct exAVMedia *self);                                    /* close the media file */
+	int (*save_as)(struct exAVMedia *self, const char *url);
 
 	/* Caches */
 #define VIDEO_PACKET_QUEUE_SIZE  32

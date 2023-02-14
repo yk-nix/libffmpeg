@@ -268,23 +268,29 @@ int av_frame_save(AVFrame *frame, const char *url) {
 	AVCodecContext *codec_ctx = NULL;
 	AVStream *stream = NULL;
 	AVPacket *pkt = NULL;
+	enum AVCodecID id;
 	pkt = av_packet_alloc();
 	if (pkt == NULL) {
 		ret = AVERROR(ENOMEM);
 		av_log(NULL, AV_LOG_ERROR, "av_frame_save: av_packet_alloc error: %s\n", av_err2str(ret));
 		goto err0;
 	}
-	codec = avcodec_find_encoder_by_name("mjpeg");
+	if ((ret = avformat_alloc_output_context2(&fmt_ctx, NULL, NULL, url)) < 0) {
+		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avformat_alloc_output_context2 error: %s\n", av_err2str(ret));
+		goto err1;
+	}
+	id = av_guess_codec(fmt_ctx->oformat, NULL, url, NULL, AVMEDIA_TYPE_VIDEO);
+	codec = avcodec_find_encoder(id == AV_CODEC_ID_NONE ? AV_CODEC_ID_MJPEG : id);
 	if (codec == NULL) {
 		ret = AVERROR(ENOENT);
-		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avcodec_find_encoder error: %s: AV_CODEC_ID_MJPEG\n", av_err2str(ret));
-		goto err1;
+		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avcodec_find_encoder error: no such av-codec supported for codec_id %d", id);
+		goto err2;
 	}
 	codec_ctx = avcodec_alloc_context3(codec);
 	if (codec_ctx == NULL) {
 		ret = AVERROR(ENOMEM);
 		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avcodec_alloc_context3 error: %s\n", av_err2str(ret));
-		goto err1;
+		goto err2;
 	}
 	codec_ctx->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
 	codec_ctx->time_base = (AVRational) {1, 1};
@@ -292,15 +298,11 @@ int av_frame_save(AVFrame *frame, const char *url) {
 	codec_ctx->height = frame->height;
 	if (!avcodec_is_supported_pix_format(codec, frame->format)) {
 		if (av_frame_convert_pix_format(frame, AV_PIX_FMT_YUV420P))
-			goto err2;
+			goto err3;
 		codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 	}
 	else {
 		codec_ctx->pix_fmt = (enum AVPixelFormat)frame->format;
-	}
-	if ((ret = avformat_alloc_output_context2(&fmt_ctx, NULL, NULL, url)) < 0) {
-		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avformat_alloc_output_context2 error: %s\n", av_err2str(ret));
-		goto err2;
 	}
 	if(!(stream = avformat_new_stream(fmt_ctx, codec))) {
 		av_log(NULL, AV_LOG_ERROR, "av_frame_save: avformat_new_stream: unable to create a new av-stream\n");
@@ -348,9 +350,9 @@ err4:
 	if(ret < 0)
 		avpriv_io_delete(url);
 err3:
-	avformat_free_context(fmt_ctx);
-err2:
 	avcodec_free_context(&codec_ctx);
+err2:
+	avformat_free_context(fmt_ctx);
 err1:
 	av_packet_free(&pkt);
 err0:
