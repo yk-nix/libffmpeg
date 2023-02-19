@@ -340,14 +340,14 @@ static void print_codec(const AVCodec *c) {
 	}
 
 	if (c->supported_framerates) {
-			const AVRational *fps = c->supported_framerates;
+		const AVRational *fps = c->supported_framerates;
 
-			printf("    Supported framerates:");
-			while (fps->num) {
-					printf(" %d/%d", fps->num, fps->den);
-					fps++;
-			}
-			printf("\n");
+		printf("    Supported framerates:");
+		while (fps->num) {
+			printf(" %d/%d", fps->num, fps->den);
+			fps++;
+		}
+		printf("\n");
 	}
 	PRINT_CODEC_SUPPORTED(c, pix_fmts, enum AVPixelFormat, "pixel formats",
 												AV_PIX_FMT_NONE, GET_PIX_FMT_NAME);
@@ -356,25 +356,23 @@ static void print_codec(const AVCodec *c) {
 	PRINT_CODEC_SUPPORTED(c, sample_fmts, enum AVSampleFormat, "sample formats",
 												AV_SAMPLE_FMT_NONE, GET_SAMPLE_FMT_NAME);
 
-	if (c->channel_layouts) {
-		const uint64_t *p = c->channel_layouts;
+	if (c->ch_layouts) {
+		const AVChannelLayout *p = c->ch_layouts;
 
 		printf("    Supported channel layouts:");
-		while (p++) {
-			char name[128] = {0};
-			int channels = av_get_channel_layout_nb_channels(*p);
-			if(channels <= 0)
-				continue;
-			av_get_channel_layout_string(name, sizeof(name), channels, *p);
+		while (p->nb_channels) {
+			char name[128];
+			av_channel_layout_describe(p, name, sizeof(name));
 			printf(" %s", name);
+			p++;
 		}
 		printf("\n");
 	}
 
 	if (c->priv_class) {
-			show_help_children(c->priv_class,
-												 AV_OPT_FLAG_ENCODING_PARAM |
-												 AV_OPT_FLAG_DECODING_PARAM);
+		show_help_children(c->priv_class,
+											 AV_OPT_FLAG_ENCODING_PARAM |
+											 AV_OPT_FLAG_DECODING_PARAM);
 	}
 }
 
@@ -512,7 +510,7 @@ static void show_help_filter(const char *name) {
 		printf("    slice threading supported\n");
 
 	printf("    Inputs:\n");
-	count = avfilter_pad_count(f->inputs);
+	count = avfilter_filter_pad_count(f, 0);
 	for (i = 0; i < count; i++) {
 		printf("       #%d: %s (%s)\n", i, avfilter_pad_get_name(f->inputs, i),
 					 av_get_media_type_string(avfilter_pad_get_type(f->inputs, i)));
@@ -523,7 +521,7 @@ static void show_help_filter(const char *name) {
 		printf("        none (source filter)\n");
 
 	printf("    Outputs:\n");
-	count = avfilter_pad_count(f->outputs);
+	count = avfilter_filter_pad_count(f, 1);
 	for (i = 0; i < count; i++) {
 		printf("       #%d: %s (%s)\n", i, avfilter_pad_get_name(f->outputs, i),
 					 av_get_media_type_string(avfilter_pad_get_type(f->outputs, i)));
@@ -800,7 +798,7 @@ int show_filters(void *optctx, const char *opt, const char *arg) {
 				*(descr_cur++) = '>';
 			}
 			pad = i ? filter->outputs : filter->inputs;
-			nb_pads = avfilter_pad_count(filter->inputs);
+			nb_pads = avfilter_filter_pad_count(filter, i);
 			for (j = 0; j < nb_pads; j++) {
 				if (descr_cur >= descr + sizeof(descr) - 4)
 					break;

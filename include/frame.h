@@ -22,10 +22,10 @@
 /*
  * Check if pixel format 'format' is the supported format for a 'codec'.
  */
-static inline int avcodec_is_supported_pix_format(AVCodec *codec, const enum AVPixelFormat format) {
+static inline int avcodec_is_supported_pix_format(const AVCodec *codec, const enum AVPixelFormat format) {
 	if (format == AV_PIX_FMT_NONE)
 		return 0;
-	for (int i = 0; i < FF_ARRAY_ELEMS(codec->pix_fmts); i++) {
+	for (int i = 0; codec->pix_fmts[i] != -1; i++) {
 		if(codec->pix_fmts[i] == format)
 			return 1;
 	}
@@ -35,10 +35,10 @@ static inline int avcodec_is_supported_pix_format(AVCodec *codec, const enum AVP
 /*
  * Check if sample format 'format' is the supported format for a 'codec'.
  */
-static inline int avcodec_is_supported_sample_format(AVCodec *codec, const enum AVSampleFormat format) {
+static inline int avcodec_is_supported_sample_format(const AVCodec *codec, const enum AVSampleFormat format) {
 	if (format == AV_SAMPLE_FMT_NONE)
 		return 0;
-	for (int i = 0; i < FF_ARRAY_ELEMS(codec->sample_fmts); i++) {
+	for (int i = 0; codec->sample_fmts[i] != -1; i++) {
 		if(codec->sample_fmts[i] == format)
 			return 1;
 	}

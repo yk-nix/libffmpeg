@@ -14,6 +14,7 @@
    Studio) will not omit unused inline functions and create undefined
    references to libraries that are not being built. */
 #include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libswscale/version.h>
 #include <libswresample/swresample.h>

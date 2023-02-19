@@ -4,7 +4,7 @@
  *  Created on: 2023-02-01 14:55:49
  *      Author: yui
  */
-
+#include <stdint.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #if WIN32
@@ -17,7 +17,9 @@
 #	include <netdb.h>
 #endif
 
+#include <libavutil/error.h>
 #include <libavutil/log.h>
+#include <libavutil/mem.h>
 
 int av_tcp_connect(const char *host, const char *service) {
 	int sock = -1;

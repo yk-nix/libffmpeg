@@ -7,6 +7,7 @@
 
 #include <libavformat/avio.h>
 #include <libavutil/hash.h>
+#include <libavutil/mem.h>
 
 int av_hash_file(const char *hash_type, const char *url, uint8_t **out) {
 	int ret = 0, hash_size = 0;

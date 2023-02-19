@@ -14,7 +14,7 @@ AVFrame	*av_frame_load_picture(const char *url) {
 	AVCodecContext *cc = NULL;
 	AVPacket *pkt = NULL;
 	AVFrame *frame = NULL;
-	AVCodec *codec = NULL;
+	const AVCodec *codec = NULL;
 	pkt = av_packet_alloc();
 	if (pkt == NULL)
 		goto err0;
@@ -264,7 +264,7 @@ static void ex_av_frame_show(exAVFrame *self) {
 int av_frame_save(AVFrame *frame, const char *url) {
 	int ret = -1;
 	AVFormatContext *fmt_ctx = NULL;
-	AVCodec *codec = NULL;
+	const AVCodec *codec = NULL;
 	AVCodecContext *codec_ctx = NULL;
 	AVStream *stream = NULL;
 	AVPacket *pkt = NULL;
@@ -348,7 +348,7 @@ err5:
 err4:
 	avio_close(fmt_ctx->pb);
 	if(ret < 0)
-		avpriv_io_delete(url);
+		avio_delete(url);
 err3:
 	avcodec_free_context(&codec_ctx);
 err2:

@@ -5,9 +5,12 @@
  *      Author: yui
  */
 
+#include <string.h>
+
 #include <libavutil/encryption_info.h>
 #include <libavutil/error.h>
 #include <libavutil/log.h>
+#include <libavutil/mem.h>
 #include <libavutil/aes.h>
 #include <libavutil/des.h>
 #include <libavutil/camellia.h>

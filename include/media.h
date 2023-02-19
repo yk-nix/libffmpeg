@@ -8,6 +8,8 @@
 #ifndef INCLUDE_MEDIA_H_
 #define INCLUDE_MEDIA_H_
 
+#include <libavutil/channel_layout.h>
+
 #include <ffmpeg_config.h>
 #include <frame.h>
 #include <packet.h>
@@ -70,10 +72,10 @@ typedef struct exAVFrameQueue {
 
 typedef struct exAudioParams {
     int sample_rate;
-    int channels;
+//    int channels;
     enum AVSampleFormat sample_fmt;
     int frame_size;
-    int64_t channel_layout;
+    AVChannelLayout channel_layout;
     int bytes_per_sec;
 } exAudioParams;
 
@@ -184,8 +186,8 @@ typedef struct exAVMedia {
 	uint64_t video_start_time;
 
 	/* Audio Stream informations */
-	int audio_sample_rate, audio_sample_fmt, audio_channels, audio_frame_size;
-	uint64_t audio_channel_layout;
+	int audio_sample_rate, audio_sample_fmt, audio_frame_size;
+	AVChannelLayout audio_channel_layout;
 	AVRational audio_time_base;
 	uint64_t audio_start_time;
 
